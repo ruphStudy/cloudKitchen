@@ -48,18 +48,25 @@ export interface AdminOrder {
   id: string;
   service_day_id: string;
   order_no: string;
+  public_token: string;
   status: OrderStatus;
   customer_name: string;
   customer_phone: string;
+  subtotal_paise: number;
+  discount_paise: number;
   total_paise: number;
   slot_id: string;
   created_at: string;
   paid_at: string | null;
   razorpay_payment_id: string | null;
+  refund_id: string | null;
+  refunded_at: string | null;
+  refund_note: string | null;
+  coupon: { code: string } | null;
   items: { menu_item_id: string; name: string; category: string; quantity: number }[];
 }
 
-function check<T>(res: { data: T | null; error: { message: string } | null }, what: string): T {
+function check<T>(res: { data: unknown; error: { message: string } | null }, what: string): T {
   if (res.error) throw new Error(`${what}: ${res.error.message}`);
   return (res.data ?? []) as T;
 }
@@ -106,9 +113,36 @@ export async function listOrders(dayIds: string[]): Promise<AdminOrder[]> {
   const res = await getAdminClient()
     .from("orders")
     .select(
-      "id,service_day_id,order_no,status,customer_name,customer_phone,total_paise,slot_id,created_at,paid_at,razorpay_payment_id,items:order_items(menu_item_id,name,category,quantity)",
+      "id,service_day_id,order_no,public_token,status,customer_name,customer_phone,subtotal_paise,discount_paise,total_paise,slot_id,created_at,paid_at,razorpay_payment_id,refund_id,refunded_at,refund_note,coupon:coupons(code),items:order_items(menu_item_id,name,category,quantity)",
     )
     .in("service_day_id", dayIds)
     .order("created_at");
   return check<AdminOrder[]>(res, "Load orders");
+}
+
+export interface AdminFeedback {
+  id: string;
+  rating: number;
+  spice: "less" | "right" | "more" | null;
+  quantity_feel: "less" | "right" | "more" | null;
+  comment: string | null;
+  created_at: string;
+  order: {
+    order_no: string;
+    customer_name: string;
+    customer_phone: string;
+    service_days: { date: string } | null;
+    items: { menu_item_id: string; name: string; quantity: number }[];
+  } | null;
+}
+
+export async function listFeedback(limit = 2000): Promise<AdminFeedback[]> {
+  const res = await getAdminClient()
+    .from("feedback")
+    .select(
+      "id,rating,spice,quantity_feel,comment,created_at,order:orders(order_no,customer_name,customer_phone,service_days(date),items:order_items(menu_item_id,name,quantity))",
+    )
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  return check<AdminFeedback[]>(res, "Load feedback");
 }

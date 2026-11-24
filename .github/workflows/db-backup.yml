@@ -1,0 +1,50 @@
+# Daily database backup (Supabase free tier has no downloadable daily backups).
+# Setup: GitHub → Settings → Secrets and variables → Actions → New secret
+#   SUPABASE_DB_URL = the *Session pooler* connection string (Project Settings → Database), with password.
+# Backups are stored as private workflow artifacts for 14 days. They contain customer
+# names and phone numbers, so keep this repository private.
+name: Daily DB backup
+
+on:
+  schedule:
+    - cron: "30 20 * * *" # 02:00 IST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check secret
+        id: check
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ]; then
+            echo "SUPABASE_DB_URL secret not set; skipping backup."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Dump public schema and data
+        if: steps.check.outputs.skip != 'true'
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          mkdir -p backup
+          stamp=$(TZ=Asia/Kolkata date +%Y-%m-%d)
+          docker run --rm -e PGURL="$SUPABASE_DB_URL" postgres:17 \
+            sh -c 'pg_dump "$PGURL" --schema=public --no-owner --no-privileges' \
+            | gzip > "backup/kitchen-$stamp.sql.gz"
+          ls -lh backup
+          test -s "backup/kitchen-$stamp.sql.gz"
+
+      - name: Upload backup
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-backup
+          path: backup/
+          retention-days: 14

@@ -10,7 +10,7 @@ export function AdminNav({ signOut }: { signOut: () => Promise<void> }) {
     return (
       <Link
         href={href}
-        className={`flex h-11 items-center rounded-lg px-4 text-base font-semibold ${
+        className={`flex h-11 shrink-0 items-center rounded-lg px-3 text-base font-semibold ${
           active ? "bg-white text-brand-700" : "text-white"
         }`}
       >
@@ -20,11 +20,13 @@ export function AdminNav({ signOut }: { signOut: () => Promise<void> }) {
   };
 
   return (
-    <nav className="sticky top-0 z-20 flex items-center gap-1 bg-brand-600 px-2 py-2">
+    <nav className="sticky top-0 z-20 flex items-center gap-1 overflow-x-auto bg-brand-600 px-2 py-2">
       {tab("/admin", "Orders")}
       {tab("/admin/settings", "Settings")}
-      <form action={signOut} className="ml-auto">
-        <button className="h-11 px-3 text-sm text-brand-100">Sign out</button>
+      {tab("/admin/coupons", "Coupons")}
+      {tab("/admin/feedback", "Feedback")}
+      <form action={signOut} className="ml-auto shrink-0">
+        <button className="h-11 px-2 text-sm text-brand-100">Sign out</button>
       </form>
     </nav>
   );

@@ -4,10 +4,12 @@ export const KITCHEN = {
   tagline: "Home-cooked mutton & chicken bowls, fresh every weekend in Pune.",
   pickupAddress: "Flat 0, Your Society Name, Baner, Pune 411045",
   pickupNote: "Please show your order number at pickup.",
-  /** WhatsApp number with country code, digits only (e.g. 919876543210). */
-  whatsappNumber: "919999999999",
   whatsappMessage: "Hi! I'd like to know when the next orders open.",
+  helpMessage: "Hi! I have a question about my order.",
 } as const;
+
+/** Our WhatsApp number with country code, digits only (e.g. 919876543210). Empty = buttons hidden. */
+export const WHATSAPP_NUMBER = (process.env.NEXT_PUBLIC_WHATSAPP_NUMBER ?? "").replace(/\D/g, "");
 
 /** Max quantity of a single dish in one order. Keep in sync with the API schema. */
 export const MAX_QTY_PER_ITEM = 20;

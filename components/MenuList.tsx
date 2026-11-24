@@ -13,9 +13,11 @@ interface Props {
   items: MenuItem[];
   maxAvailable: Partial<Record<Category, number>>;
   ordersOpen: boolean;
+  /** Cap on total bowls in the cart (1 when only tasting days are open). */
+  maxTotalItems?: number;
 }
 
-export function MenuList({ items, maxAvailable, ordersOpen }: Props) {
+export function MenuList({ items, maxAvailable, ordersOpen, maxTotalItems }: Props) {
   const { cart, ready, setQty } = useCart();
   const summary = summarizeCart(cart, items);
 
@@ -27,7 +29,12 @@ export function MenuList({ items, maxAvailable, ordersOpen }: Props) {
           const categoryLeft = maxAvailable[item.category] ?? 0;
           const inCartForCategory = summary.byCategory[item.category] ?? 0;
           const soldOut = categoryLeft <= 0;
-          const canAdd = ordersOpen && !soldOut && quantity < MAX_QTY_PER_ITEM && inCartForCategory < categoryLeft;
+          const canAdd =
+            ordersOpen &&
+            !soldOut &&
+            quantity < MAX_QTY_PER_ITEM &&
+            inCartForCategory < categoryLeft &&
+            (maxTotalItems === undefined || summary.count < maxTotalItems);
 
           return (
             <li key={item.id} className="flex gap-3 rounded-2xl bg-white p-3 shadow-sm ring-1 ring-stone-200">

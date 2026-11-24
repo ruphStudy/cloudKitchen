@@ -12,7 +12,7 @@ import { weekday } from "@/lib/order-window";
 import { getBrowserClient } from "@/lib/supabase/browser";
 import { OrderRow } from "@/components/admin/OrderRow";
 
-type StatusFilter = "all" | "paid" | "ready" | "picked_up" | "cancelled";
+type StatusFilter = "all" | "paid" | "ready" | "picked_up" | "cancelled" | "refunded";
 
 const FILTERS: { value: StatusFilter; label: string }[] = [
   { value: "all", label: "All" },
@@ -20,6 +20,7 @@ const FILTERS: { value: StatusFilter; label: string }[] = [
   { value: "ready", label: "Ready" },
   { value: "picked_up", label: "Picked up" },
   { value: "cancelled", label: "Cancelled" },
+  { value: "refunded", label: "Refunded" },
 ];
 
 const WEEKDAY = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -33,6 +34,7 @@ interface Props {
   menu: AdminMenuItem[];
   orders: AdminOrder[];
   serverNow: number;
+  siteUrl: string;
 }
 
 function matchesSearch(o: AdminOrder, q: string): boolean {
@@ -62,7 +64,7 @@ function beep(ctx: AudioContext) {
   }
 }
 
-export function AdminDashboard({ days, day, today, slots, stock, menu, orders, serverNow }: Props) {
+export function AdminDashboard({ days, day, today, slots, stock, menu, orders, serverNow, siteUrl }: Props) {
   const router = useRouter();
   const [now, setNow] = useState(serverNow);
   const [filter, setFilter] = useState<StatusFilter>("all");
@@ -151,6 +153,7 @@ export function AdminDashboard({ days, day, today, slots, stock, menu, orders, s
   const revenue = confirmed.reduce((sum, o) => sum + o.total_paise, 0);
   const waiting = orders.filter((o) => o.status === "paid" || o.status === "ready").length;
   const staleCount = orders.filter((o) => isStalePending(o, now)).length;
+  const refundsNeeded = orders.filter((o) => o.status === "cancelled" && o.razorpay_payment_id).length;
 
   const visible = orders.filter((o) => {
     if (o.status === "pending_payment") {
@@ -220,6 +223,16 @@ export function AdminDashboard({ days, day, today, slots, stock, menu, orders, s
         </button>
       )}
 
+      {refundsNeeded > 0 && (
+        <button
+          type="button"
+          onClick={() => setFilter("cancelled")}
+          className="w-full rounded-xl bg-red-600 py-3 text-base font-bold text-white"
+        >
+          {refundsNeeded} order{refundsNeeded === 1 ? "" : "s"} need{refundsNeeded === 1 ? "s" : ""} a refund · show
+        </button>
+      )}
+
       {/* Summary */}
       <div className="grid grid-cols-3 gap-2">
         <Stat label="Paid orders" value={String(confirmed.length)} />
@@ -267,6 +280,13 @@ export function AdminDashboard({ days, day, today, slots, stock, menu, orders, s
           })}
         </div>
       </section>
+
+      <a
+        href={`/api/admin/export/orders?day=${day.id}`}
+        className="flex h-12 items-center justify-center rounded-xl bg-white text-base font-semibold ring-1 ring-stone-200"
+      >
+        ⬇ Export orders CSV ({formatDayLong(day.date)})
+      </a>
 
       {/* Filters */}
       <div className="space-y-2">
@@ -320,7 +340,7 @@ export function AdminDashboard({ days, day, today, slots, stock, menu, orders, s
             ) : (
               <ul className="space-y-2">
                 {rows.map((o) => (
-                  <OrderRow key={o.id} order={o} now={now} />
+                  <OrderRow key={o.id} order={o} now={now} siteUrl={siteUrl} />
                 ))}
               </ul>
             )}

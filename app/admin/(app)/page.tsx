@@ -2,6 +2,7 @@ import Link from "next/link";
 import { listDays, listMenu, listOrders, listSlots, listStock, type AdminDay } from "@/lib/admin-data";
 import { addDays, istDate } from "@/lib/order-window";
 import { AdminDashboard } from "@/components/admin/AdminDashboard";
+import { siteUrl } from "@/lib/site";
 
 export const dynamic = "force-dynamic";
 
@@ -51,6 +52,7 @@ export default async function AdminHome({ searchParams }: { searchParams: Promis
       menu={menu}
       orders={orders}
       serverNow={Date.now()}
+      siteUrl={siteUrl()}
     />
   );
 }

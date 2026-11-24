@@ -1,5 +1,6 @@
 import { getCatalog, maxAvailableByCategory } from "@/lib/catalog";
-import { KITCHEN } from "@/lib/config";
+import { KITCHEN, WHATSAPP_NUMBER } from "@/lib/config";
+import { waLink } from "@/lib/whatsapp";
 import { weekdayLongOfInstant, weekdayShort } from "@/lib/format";
 import { istDate } from "@/lib/order-window";
 import { MenuList } from "@/components/MenuList";
@@ -22,7 +23,7 @@ export default async function MenuPage() {
     ? `Orders for ${openDays.map((d) => weekdayShort(d.date)).join(" & ")}`
     : "Orders are closed right now";
 
-  const whatsappUrl = `https://wa.me/${KITCHEN.whatsappNumber}?text=${encodeURIComponent(KITCHEN.whatsappMessage)}`;
+  const tastingOnly = ordersOpen && openDays.every((d) => d.isTastingDay);
 
   return (
     <main className="pb-32">
@@ -35,18 +36,31 @@ export default async function MenuPage() {
       {!ordersOpen && (
         <div className="mx-4 mt-4 rounded-2xl bg-amber-50 p-4 text-amber-950 ring-1 ring-amber-200">
           <p className="text-base font-semibold">Orders are closed right now. {nextOpenText(catalog.nextOpensAt)}</p>
+          {WHATSAPP_NUMBER && (
           <a
-            href={whatsappUrl}
+            href={waLink(WHATSAPP_NUMBER, KITCHEN.whatsappMessage)}
             target="_blank"
             rel="noopener noreferrer"
             className="mt-3 flex h-12 items-center justify-center rounded-xl bg-[#1fa855] text-base font-bold text-white active:opacity-90"
           >
             Message us on WhatsApp
           </a>
+          )}
         </div>
       )}
 
-      <MenuList items={catalog.items} maxAvailable={maxAvailable} ordersOpen={ordersOpen} />
+      {tastingOnly && (
+        <p className="mx-4 mt-4 rounded-2xl bg-purple-50 p-4 text-base text-purple-950 ring-1 ring-purple-200">
+          <b>Tasting day!</b> One bowl per person. Pick the one you&apos;d like to try.
+        </p>
+      )}
+
+      <MenuList
+        items={catalog.items}
+        maxAvailable={maxAvailable}
+        ordersOpen={ordersOpen}
+        maxTotalItems={tastingOnly ? 1 : undefined}
+      />
     </main>
   );
 }

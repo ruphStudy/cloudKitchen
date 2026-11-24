@@ -52,10 +52,14 @@ export async function POST(req: Request) {
   });
 
   if (!result.ok) {
-    console.error("webhook: markOrderPaid failed", { event: event.event, payment: payment.id, result });
-    // 500 makes Razorpay retry (useful for transient DB errors). Other cases won't fix themselves.
-    if (result.reason === "db_error") return NextResponse.json({ error: "db error" }, { status: 500 });
-    return NextResponse.json({ ok: true, ignored: result.reason });
+    console.error("webhook: mark_order_paid failed", { event: event.event, payment: payment.id, result });
+    // 500 makes Razorpay retry, which helps with transient DB errors.
+    return NextResponse.json({ error: "db error" }, { status: 500 });
+  }
+  if (result.outcome !== "paid" && result.outcome !== "already_paid") {
+    // paid_after_cancel → admin sees "Refund needed". Others won't fix themselves on retry.
+    console.warn("webhook: payment not applied", { outcome: result.outcome, payment: payment.id, order: payment.order_id });
+    return NextResponse.json({ ok: true, outcome: result.outcome });
   }
 
   return NextResponse.json({ ok: true });

@@ -1,10 +1,12 @@
-import crypto from "node:crypto";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getAdminClient } from "@/lib/supabase/server";
 import { getRazorpay } from "@/lib/razorpay";
 import { PHONE_REGEX } from "@/lib/cart";
 import { MAX_QTY_PER_ITEM, ORDER_RATE_LIMIT } from "@/lib/config";
+import { couponErrorMessage } from "@/lib/coupon-errors";
+import { ipBucket } from "@/lib/ip";
+import { hitRateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,6 +21,12 @@ const OrderInput = z.object({
     .array(z.object({ menuItemId: z.uuid(), quantity: z.number().int().min(1).max(MAX_QTY_PER_ITEM) }))
     .min(1, "Your cart is empty")
     .max(20),
+  couponCode: z
+    .string()
+    .trim()
+    .max(20)
+    .optional()
+    .transform((v) => (v ? v.toUpperCase() : undefined)),
 });
 
 const DB_ERRORS: Record<string, { status: number; message: string }> = {
@@ -31,13 +39,12 @@ const DB_ERRORS: Record<string, { status: number; message: string }> = {
     status: 429,
     message: "You already have 2 unpaid orders. Please finish paying for one, or wait 10 minutes and try again.",
   },
+  TASTING_ONE_ITEM: {
+    status: 409,
+    message: "Tasting day: 1 bowl per person. Please keep just one item in your cart.",
+  },
+  TASTING_ALREADY_BOOKED: { status: 409, message: "You've already booked your taste bowl!" },
 };
-
-function clientIp(req: Request): string {
-  // Vercel sets x-forwarded-for; the first entry is the client.
-  const fwd = req.headers.get("x-forwarded-for");
-  return fwd?.split(",")[0]?.trim() || req.headers.get("x-real-ip") || "unknown";
-}
 
 function jsonError(status: number, code: string, message: string) {
   return NextResponse.json({ error: { code, message } }, { status });
@@ -67,18 +74,16 @@ export async function POST(req: Request) {
   const db = getAdminClient();
 
   // Per-IP limit. Only a hash of the IP is stored.
-  const ipHash = crypto.createHash("sha256").update(clientIp(req)).digest("hex").slice(0, 32);
-  const { data: allowed, error: rlError } = await db.rpc("hit_rate_limit", {
-    p_bucket: `orders:ip:${ipHash}`,
-    p_limit: ORDER_RATE_LIMIT.perIp,
-    p_window_seconds: ORDER_RATE_LIMIT.windowSeconds,
-  });
-  if (rlError) {
-    console.error("rate limit check failed", rlError);
+  try {
+    const allowed = await hitRateLimit(
+      ipBucket("orders:ip", req.headers),
+      ORDER_RATE_LIMIT.perIp,
+      ORDER_RATE_LIMIT.windowSeconds,
+    );
+    if (!allowed) return jsonError(429, "RATE_LIMITED", "Too many attempts. Please wait a few minutes and try again.");
+  } catch (err) {
+    console.error(err);
     return jsonError(500, "SERVER_ERROR", "Could not place your order. Please try again.");
-  }
-  if (allowed === false) {
-    return jsonError(429, "RATE_LIMITED", "Too many attempts. Please wait a few minutes and try again.");
   }
 
   // Validates day/slot/stock and inserts order + items atomically. Prices come from the DB.
@@ -90,12 +95,15 @@ export async function POST(req: Request) {
       p_customer_phone: input.phone,
       p_fulfilment: input.fulfilment,
       p_items: [...qty].map(([menu_item_id, quantity]) => ({ menu_item_id, quantity })),
+      p_coupon_code: input.couponCode ?? null,
     })
     .single<{ order_id: string; order_no: string; public_token: string; total_paise: number }>();
 
   if (error || !data) {
     const known = error && DB_ERRORS[error.message];
     if (known) return jsonError(known.status, error.message, known.message);
+    const couponMsg = error && couponErrorMessage(error.message, error.details);
+    if (couponMsg) return jsonError(409, error!.message, couponMsg);
     console.error("place_order failed", error);
     return jsonError(500, "SERVER_ERROR", "Could not place your order. Please try again.");
   }

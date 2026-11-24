@@ -1,10 +1,16 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { setOrderStatus, type StatusAction } from "@/app/admin/actions";
+import {
+  markRefundedManually,
+  refundOrder,
+  setOrderStatus,
+  type StatusAction,
+} from "@/app/admin/actions";
 import type { AdminOrder } from "@/lib/admin-data";
-import { isStalePending } from "@/lib/availability";
+import { isConfirmed, isStalePending } from "@/lib/availability";
 import { formatPaise } from "@/lib/format";
+import { feedbackRequestMessage, waLink } from "@/lib/whatsapp";
 
 function Badge({ order, now }: { order: AdminOrder; now: number }) {
   const map: Record<string, [string, string]> = {
@@ -12,6 +18,7 @@ function Badge({ order, now }: { order: AdminOrder; now: number }) {
     ready: ["Ready", "bg-green-100 text-green-800"],
     picked_up: ["Picked up", "bg-stone-200 text-stone-700"],
     cancelled: ["Cancelled", "bg-red-100 text-red-800"],
+    refunded: ["Refunded", "bg-purple-100 text-purple-800"],
   };
   let [label, cls] = map[order.status] ?? ["", ""];
   if (order.status === "pending_payment") {
@@ -26,26 +33,49 @@ function formatPhone(p: string): string {
   return `${p.slice(0, 5)} ${p.slice(5)}`;
 }
 
-export function OrderRow({ order, now }: { order: AdminOrder; now: number }) {
+type Confirming = null | "cancel" | "refund";
+
+export function OrderRow({ order, now, siteUrl }: { order: AdminOrder; now: number; siteUrl: string }) {
   const [pending, startTransition] = useTransition();
-  const [confirmCancel, setConfirmCancel] = useState(false);
+  const [confirming, setConfirming] = useState<Confirming>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showManual, setShowManual] = useState(false);
 
   function run(action: StatusAction) {
     setError(null);
     startTransition(async () => {
       const res = await setOrderStatus(order.id, action);
       if (!res.ok) setError(res.message ?? "Something went wrong.");
-      setConfirmCancel(false);
+      setConfirming(null);
+    });
+  }
+
+  function refund(manual: boolean) {
+    setError(null);
+    startTransition(async () => {
+      const res = manual ? await markRefundedManually(order.id) : await refundOrder(order.id);
+      if (!res.ok) {
+        setError(res.message ?? "Refund failed.");
+        if (res.canMarkManually) setShowManual(true);
+      } else {
+        setShowManual(false);
+      }
+      setConfirming(null);
     });
   }
 
   const refundNeeded = order.status === "cancelled" && !!order.razorpay_payment_id;
   const canCancel = order.status === "pending_payment" || order.status === "paid" || order.status === "ready";
-  const dim = order.status === "picked_up" || order.status === "cancelled";
+  const dim = order.status === "picked_up" || order.status === "cancelled" || order.status === "refunded";
+  const feedbackHref = isConfirmed(order.status)
+    ? waLink(
+        `91${order.customer_phone}`,
+        feedbackRequestMessage(order.customer_name, order.order_no, `${siteUrl}/feedback/${order.public_token}`),
+      )
+    : null;
 
   return (
-    <li className={`rounded-2xl bg-white p-3 ring-1 ring-stone-200 ${dim ? "opacity-70" : ""}`}>
+    <li className={`rounded-2xl bg-white p-3 ring-1 ring-stone-200 ${dim && !refundNeeded ? "opacity-70" : ""}`}>
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -60,7 +90,14 @@ export function OrderRow({ order, now }: { order: AdminOrder; now: number }) {
             📞 {formatPhone(order.customer_phone)}
           </a>
         </div>
-        <span className="shrink-0 text-lg font-bold tabular-nums">{formatPaise(order.total_paise)}</span>
+        <div className="shrink-0 text-right">
+          <span className="text-lg font-bold tabular-nums">{formatPaise(order.total_paise)}</span>
+          {order.discount_paise > 0 && (
+            <span className="block text-xs text-green-700">
+              −{formatPaise(order.discount_paise)} {order.coupon?.code}
+            </span>
+          )}
+        </div>
       </div>
 
       <p className="mt-1 text-base">
@@ -72,37 +109,40 @@ export function OrderRow({ order, now }: { order: AdminOrder; now: number }) {
         ))}
       </p>
 
+      {order.status === "refunded" && (
+        <p className="mt-1 text-xs text-purple-800">
+          {order.refund_id ? `Refund ID ${order.refund_id}` : (order.refund_note ?? "Refunded")}
+        </p>
+      )}
+
       {error && <p className="mt-2 rounded-lg bg-red-50 p-2 text-sm text-red-800">{error}</p>}
 
-      {confirmCancel ? (
-        <div className="mt-3 rounded-xl bg-red-50 p-3">
-          <p className="text-sm text-red-900">
-            Cancel {order.order_no}?
-            {order.status === "pending_payment"
+      {confirming === "cancel" && (
+        <ConfirmBox
+          text={`Cancel ${order.order_no}?${
+            order.status === "pending_payment"
               ? " Its stock and slot will be released."
-              : " Remember to refund the customer in Razorpay."}
-          </p>
-          <div className="mt-2 grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              disabled={pending}
-              onClick={() => run("cancel")}
-              className="h-12 rounded-xl bg-red-600 font-bold text-white disabled:opacity-60"
-            >
-              {pending ? "Cancelling…" : "Yes, cancel"}
-            </button>
-            <button
-              type="button"
-              disabled={pending}
-              onClick={() => setConfirmCancel(false)}
-              className="h-12 rounded-xl bg-white font-semibold ring-1 ring-stone-300"
-            >
-              Keep order
-            </button>
-          </div>
-        </div>
-      ) : (
-        <div className="mt-3 flex gap-2">
+              : " You'll then need to refund it (Refund button)."
+          }`}
+          yes="Yes, cancel"
+          pending={pending}
+          onYes={() => run("cancel")}
+          onNo={() => setConfirming(null)}
+        />
+      )}
+
+      {confirming === "refund" && (
+        <ConfirmBox
+          text={`Refund ${formatPaise(order.total_paise)} to ${order.customer_name} through Razorpay?`}
+          yes="Yes, refund"
+          pending={pending}
+          onYes={() => refund(false)}
+          onNo={() => setConfirming(null)}
+        />
+      )}
+
+      {confirming === null && (
+        <div className="mt-3 flex flex-wrap gap-2">
           {order.status === "paid" && (
             <ActionButton pending={pending} onClick={() => run("ready")} className="bg-green-600 text-white">
               Mark Ready
@@ -117,6 +157,16 @@ export function OrderRow({ order, now }: { order: AdminOrder; now: number }) {
               Mark Picked up
             </ActionButton>
           )}
+          {refundNeeded && (
+            <ActionButton pending={pending} onClick={() => setConfirming("refund")} className="bg-red-600 text-white">
+              Refund {formatPaise(order.total_paise)}
+            </ActionButton>
+          )}
+          {refundNeeded && showManual && (
+            <ActionButton pending={pending} onClick={() => refund(true)} className="bg-white ring-1 ring-stone-300">
+              Mark refunded manually
+            </ActionButton>
+          )}
           {order.status === "ready" && (
             <SmallButton disabled={pending} onClick={() => run("undo_ready")}>
               Undo
@@ -127,14 +177,55 @@ export function OrderRow({ order, now }: { order: AdminOrder; now: number }) {
               Undo picked up
             </SmallButton>
           )}
+          {feedbackHref && order.status === "picked_up" && (
+            <a
+              href={feedbackHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex h-12 items-center rounded-xl px-3 text-sm font-semibold text-[#128c4a]"
+            >
+              Ask feedback
+            </a>
+          )}
           {canCancel && (
-            <SmallButton disabled={pending} onClick={() => setConfirmCancel(true)} className="ml-auto text-red-600">
+            <SmallButton disabled={pending} onClick={() => setConfirming("cancel")} className="ml-auto text-red-600">
               Cancel
+            </SmallButton>
+          )}
+          {refundNeeded && !showManual && (
+            <SmallButton disabled={pending} onClick={() => setShowManual(true)} className="ml-auto">
+              Refunded elsewhere?
             </SmallButton>
           )}
         </div>
       )}
     </li>
+  );
+}
+
+function ConfirmBox(props: { text: string; yes: string; pending: boolean; onYes: () => void; onNo: () => void }) {
+  return (
+    <div className="mt-3 rounded-xl bg-red-50 p-3">
+      <p className="text-sm text-red-900">{props.text}</p>
+      <div className="mt-2 grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          disabled={props.pending}
+          onClick={props.onYes}
+          className="h-12 rounded-xl bg-red-600 font-bold text-white disabled:opacity-60"
+        >
+          {props.pending ? "Working…" : props.yes}
+        </button>
+        <button
+          type="button"
+          disabled={props.pending}
+          onClick={props.onNo}
+          className="h-12 rounded-xl bg-white font-semibold ring-1 ring-stone-300"
+        >
+          Go back
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -154,7 +245,7 @@ function ActionButton({
       type="button"
       onClick={onClick}
       disabled={pending}
-      className={`h-12 flex-1 rounded-xl px-3 text-base font-bold disabled:opacity-60 ${className}`}
+      className={`h-12 min-w-[40%] flex-1 rounded-xl px-3 text-base font-bold disabled:opacity-60 ${className}`}
     >
       {pending ? "…" : children}
     </button>

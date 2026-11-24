@@ -1,6 +1,6 @@
 export type Category = "mutton" | "chicken";
 
-export type OrderStatus = "pending_payment" | "paid" | "ready" | "picked_up" | "cancelled";
+export type OrderStatus = "pending_payment" | "paid" | "ready" | "picked_up" | "cancelled" | "refunded";
 
 export interface MenuItem {
   id: string;

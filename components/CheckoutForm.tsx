@@ -2,9 +2,9 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useCart } from "@/components/CartProvider";
-import { PHONE_REGEX, normalizePhoneInput, summarizeCart } from "@/lib/cart";
+import { PHONE_REGEX, normalizePhoneInput, summarizeCart, type CartSummary } from "@/lib/cart";
 import { KITCHEN } from "@/lib/config";
 import { formatDayShort, formatPaise } from "@/lib/format";
 import { PREFER_UPI_CONFIG, loadRazorpay, openRazorpay, type RazorpaySuccess } from "@/lib/razorpay-client";
@@ -31,11 +31,21 @@ interface PendingOrder {
   order: CreatedOrder;
 }
 
-function dayCanFulfil(day: CatalogDay, byCategory: Partial<Record<Category, number>>): boolean {
-  if (day.slots.length === 0) return false;
-  return (Object.entries(byCategory) as [Category, number][]).every(
-    ([cat, qty]) => qty <= (day.stockRemaining[cat] ?? 0),
+interface AppliedCoupon {
+  code: string;
+  discountPaise: number;
+  /** Cart total the discount was calculated for; re-checked when the cart changes. */
+  forSubtotal: number;
+}
+
+/** Why a day can't take this cart, or null if it can. Mirrors the server checks. */
+function dayIssue(day: CatalogDay, summary: CartSummary): string | null {
+  if (day.slots.length === 0) return "Fully booked";
+  if (day.isTastingDay && summary.count > 1) return "Tasting day: 1 bowl only";
+  const short = (Object.entries(summary.byCategory) as [Category, number][]).some(
+    ([cat, qty]) => qty > (day.stockRemaining[cat] ?? 0),
   );
+  return short ? "Not enough left for your cart" : null;
 }
 
 export function CheckoutForm({ catalog }: { catalog: Catalog }) {
@@ -53,6 +63,58 @@ export function CheckoutForm({ catalog }: { catalog: Catalog }) {
   const pendingRef = useRef<PendingOrder | null>(null);
   const failureRef = useRef<string | null>(null);
 
+  const [couponOpen, setCouponOpen] = useState(false);
+  const [couponInput, setCouponInput] = useState("");
+  const [coupon, setCoupon] = useState<AppliedCoupon | null>(null);
+  const [couponError, setCouponError] = useState<string | null>(null);
+  const [couponBusy, setCouponBusy] = useState(false);
+
+  const itemsPayload = useMemo(
+    () => summary.lines.map((l) => ({ menuItemId: l.item.id, quantity: l.quantity })),
+    [summary.lines],
+  );
+
+  const applyCoupon = useCallback(
+    async (code: string) => {
+      const trimmed = code.trim();
+      if (!trimmed || itemsPayload.length === 0) return;
+      const clientTotal = summary.totalPaise;
+      setCouponBusy(true);
+      setCouponError(null);
+      try {
+        const res = await fetch("/api/coupons/validate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code: trimmed, items: itemsPayload, phone: PHONE_REGEX.test(phone) ? phone : "" }),
+        });
+        const data = (await res.json().catch(() => null)) as
+          | { code: string; discountPaise: number; error?: undefined }
+          | { error: { message: string } }
+          | null;
+        if (!res.ok || !data || data.error) {
+          setCoupon(null);
+          setCouponError(data?.error?.message ?? "Could not check the coupon. Try again.");
+          return;
+        }
+        setCoupon({ code: data.code, discountPaise: data.discountPaise, forSubtotal: clientTotal });
+        setCouponInput(data.code);
+      } catch {
+        setCouponError("Could not check the coupon. Check your internet.");
+      } finally {
+        setCouponBusy(false);
+      }
+    },
+    [itemsPayload, phone, summary.totalPaise],
+  );
+
+  // Cart changed after applying: re-check so the discount shown is always right.
+  useEffect(() => {
+    if (coupon && summary.count > 0 && coupon.forSubtotal !== summary.totalPaise) void applyCoupon(coupon.code);
+  }, [coupon, summary.count, summary.totalPaise, applyCoupon]);
+
+  const discountPaise = coupon && coupon.forSubtotal === summary.totalPaise ? coupon.discountPaise : 0;
+  const payablePaise = summary.totalPaise - discountPaise;
+
   // Prefill customer details and warm up the Razorpay script.
   useEffect(() => {
     try {
@@ -69,8 +131,8 @@ export function CheckoutForm({ catalog }: { catalog: Catalog }) {
   }, []);
 
   const eligibleDays = useMemo(
-    () => catalog.days.filter((d) => dayCanFulfil(d, summary.byCategory)),
-    [catalog.days, summary.byCategory],
+    () => catalog.days.filter((d) => dayIssue(d, summary) === null),
+    [catalog.days, summary],
   );
   const selectedDay = eligibleDays.find((d) => d.id === dayId) ?? null;
   const selectedSlot = selectedDay?.slots.find((s) => s.id === slotId) ?? null;
@@ -125,7 +187,8 @@ export function CheckoutForm({ catalog }: { catalog: Catalog }) {
       name: name.trim(),
       phone,
       fulfilment: "pickup" as const,
-      items: summary.lines.map((l) => ({ menuItemId: l.item.id, quantity: l.quantity })),
+      items: itemsPayload,
+      ...(coupon ? { couponCode: coupon.code } : {}),
     };
     const signature = JSON.stringify(payload);
     const pending = pendingRef.current;
@@ -144,7 +207,15 @@ export function CheckoutForm({ catalog }: { catalog: Catalog }) {
       | null;
 
     if (!res.ok || !data || data.error) {
-      setNotice(data?.error?.message ?? "Something went wrong. Please try again.");
+      const message = data?.error?.message ?? "Something went wrong. Please try again.";
+      if (data?.error?.code.startsWith("COUPON_")) {
+        setCoupon(null);
+        setCouponOpen(true);
+        setCouponError(message);
+        setNotice("Your coupon could not be used. Remove it or try another code.");
+        return null;
+      }
+      setNotice(message);
       if (res.status === 409) router.refresh(); // reload live slots and stock
       return null;
     }
@@ -229,8 +300,8 @@ export function CheckoutForm({ catalog }: { catalog: Catalog }) {
       : phase === "paying"
         ? "Waiting for payment…"
         : notice
-          ? `Try again · Pay ${formatPaise(summary.totalPaise)}`
-          : `Pay ${formatPaise(summary.totalPaise)}`;
+          ? `Try again · Pay ${formatPaise(payablePaise)}`
+          : `Pay ${formatPaise(payablePaise)}`;
 
   return (
     <CheckoutShell>
@@ -265,11 +336,7 @@ export function CheckoutForm({ catalog }: { catalog: Catalog }) {
                         {day.label ?? "Tasting day"}
                       </span>
                     )}
-                    {!eligible && (
-                      <span className="block text-xs font-normal">
-                        {day.slots.length === 0 ? "Fully booked" : "Not enough left for your cart"}
-                      </span>
-                    )}
+                    {!eligible && <span className="block text-xs font-normal">{dayIssue(day, summary)}</span>}
                   </button>
                 );
               })}
@@ -277,6 +344,19 @@ export function CheckoutForm({ catalog }: { catalog: Catalog }) {
           )}
           {showErrors && !selectedDay && eligibleDays.length > 0 && (
             <p className="mt-1 text-sm text-red-600">Please pick a day.</p>
+          )}
+          {selectedDay?.isTastingDay && (
+            <p className="mt-2 rounded-lg bg-purple-50 p-2 text-sm text-purple-900">
+              Tasting day: one bowl per person, one order per mobile number.
+            </p>
+          )}
+          {summary.count > 1 && catalog.days.some((d) => d.isTastingDay) && eligibleDays.length === 0 && (
+            <p className="mt-2 rounded-lg bg-purple-50 p-2 text-sm text-purple-900">
+              Tasting day orders are 1 bowl per person.{" "}
+              <Link href="/" className="font-semibold underline">
+                Edit your cart
+              </Link>
+            </p>
           )}
         </section>
 
@@ -367,9 +447,72 @@ export function CheckoutForm({ catalog }: { catalog: Catalog }) {
               </li>
             ))}
           </ul>
+          {discountPaise > 0 && (
+            <div className="mt-2 flex justify-between text-base text-green-700">
+              <span>Coupon {coupon?.code}</span>
+              <span>−{formatPaise(discountPaise)}</span>
+            </div>
+          )}
           <div className="mt-2 flex justify-between border-t border-stone-200 pt-2 text-lg font-bold">
             <span>Total</span>
-            <span>{formatPaise(summary.totalPaise)}</span>
+            <span>{formatPaise(payablePaise)}</span>
+          </div>
+
+          {/* Coupon */}
+          <div className="mt-3 border-t border-stone-100 pt-2">
+            {coupon ? (
+              <div className="flex items-center justify-between text-sm">
+                <span className="font-semibold text-green-700">✓ {coupon.code} applied</span>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    setCoupon(null);
+                    setCouponInput("");
+                    setCouponError(null);
+                  }}
+                  className="h-11 px-2 font-semibold text-stone-500"
+                >
+                  Remove
+                </button>
+              </div>
+            ) : !couponOpen ? (
+              <button
+                type="button"
+                onClick={() => setCouponOpen(true)}
+                className="h-11 text-sm font-semibold text-brand-600"
+              >
+                Have a coupon?
+              </button>
+            ) : (
+              <form
+                className="flex gap-2 pt-1"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void applyCoupon(couponInput);
+                }}
+              >
+                <input
+                  value={couponInput}
+                  onChange={(e) => setCouponInput(e.target.value.toUpperCase().replace(/[^A-Z0-9_-]/g, ""))}
+                  maxLength={20}
+                  autoCapitalize="characters"
+                  autoComplete="off"
+                  placeholder="CODE"
+                  aria-label="Coupon code"
+                  disabled={busy || couponBusy}
+                  className="h-12 min-w-0 flex-1 rounded-xl border-2 border-stone-200 bg-white px-3 text-base uppercase tracking-wide outline-none focus:border-brand-600"
+                />
+                <button
+                  type="submit"
+                  disabled={busy || couponBusy || !couponInput}
+                  className="h-12 shrink-0 rounded-xl bg-stone-900 px-4 font-bold text-white disabled:opacity-50"
+                >
+                  {couponBusy ? "…" : "Apply"}
+                </button>
+              </form>
+            )}
+            {couponError && <p className="mt-1 text-sm text-red-600">{couponError}</p>}
           </div>
         </section>
       </div>

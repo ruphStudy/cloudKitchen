@@ -12,29 +12,34 @@ const VerifyInput = z.object({
   razorpay_signature: z.string().min(1).max(256),
 });
 
+function fail(status: number, code: string, message: string) {
+  return NextResponse.json({ error: { code, message } }, { status });
+}
+
 export async function POST(req: Request) {
   const parsed = VerifyInput.safeParse(await req.json().catch(() => null));
-  if (!parsed.success) {
-    return NextResponse.json({ error: { code: "INVALID_INPUT", message: "Invalid request." } }, { status: 400 });
-  }
+  if (!parsed.success) return fail(400, "INVALID_INPUT", "Invalid request.");
   const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = parsed.data;
 
   if (!isValidPaymentSignature(razorpay_order_id, razorpay_payment_id, razorpay_signature)) {
-    return NextResponse.json(
-      { error: { code: "BAD_SIGNATURE", message: "We could not verify this payment." } },
-      { status: 400 },
-    );
+    return fail(400, "BAD_SIGNATURE", "We could not verify this payment.");
   }
 
   const result = await markOrderPaid({ razorpayOrderId: razorpay_order_id, razorpayPaymentId: razorpay_payment_id });
   if (!result.ok) {
-    console.error("verify: markOrderPaid failed", result);
-    const status = result.reason === "db_error" ? 500 : result.reason === "not_found" ? 404 : 409;
-    return NextResponse.json(
-      { error: { code: result.reason.toUpperCase(), message: "We could not confirm this order." } },
-      { status },
-    );
+    console.error("verify: mark_order_paid failed", result);
+    return fail(500, "DB_ERROR", "We could not confirm this order yet.");
   }
 
-  return NextResponse.json({ ok: true, publicToken: result.publicToken });
+  switch (result.outcome) {
+    case "paid":
+    case "already_paid":
+    case "paid_after_cancel": // order page explains the refund
+      return NextResponse.json({ ok: true, outcome: result.outcome, publicToken: result.publicToken });
+    case "not_found":
+      return fail(404, "NOT_FOUND", "We could not find this order.");
+    default:
+      console.error("verify: unexpected outcome", result.outcome, razorpay_order_id);
+      return fail(409, result.outcome.toUpperCase(), "We could not confirm this order.");
+  }
 }
